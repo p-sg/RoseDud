@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Captured output
+snapshots/
+
+# Superseded scripts
+flir_app_old.py
+
+# OS clutter
+Thumbs.db
+.DS_Store
+
+# Factory calibration extracted from the sled (FLIR's file; unit-specific)
+calib.rsc

@@ -1,0 +1,6 @@
+pyusb>=1.2.1
+libusb-package>=1.0.26
+numpy>=1.24.0
+opencv-python>=4.8.0
+PyQt6>=6.4.0
+QDarkStyle>=3.2

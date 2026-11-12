@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+# Keep the extracted factory file byte-for-byte
+calib.rsc -text
