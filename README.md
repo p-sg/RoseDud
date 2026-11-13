@@ -15,6 +15,12 @@ RoseDud is a pure-USB Python client and PyQt6 viewer for the original **FLIR One
 | Linux / macOS | libusb backend included but **largely untested**; reports welcome |
 | Temperatures | Approximate: an empirical calibration model, not validated against a blackbody (see [docs §8](docs/DEVICE_AND_SYSTEM_ARCHITECTURE.md#8-radiometric-temperature-conversion--optical-fusion)) |
 
+<p align="center">
+  <img src="docs/images/screenshot-thermal.jpg" width="600" alt="RoseDud showing the warm afterimage of a hand pressed against a wall, in the Ironbow palette with spot, min, max and center readouts">
+  <br>
+  <sub>The warm print a hand left on a wall a few seconds earlier, seen through a Gen 1 case over USB. More in <a href="#screenshots">Screenshots</a>.</sub>
+</p>
+
 ---
 
 ## Legal Disclaimer & Trademark Notice
@@ -142,6 +148,20 @@ python flir_app.py --calib path/to/calib.rsc --snapshot-dir path/to/output
 * **Telemetry:** battery voltage, charge and charging state; shutter state and temperature; board, Lepton and firmware versions.
 * **Snapshots:** each one saves a thermal °C matrix (`.csv`), a colorized thermal image (`.png`) and the visual frame (`.jpg`).
 
+### Screenshots
+
+All taken on real hardware. Device serial numbers are masked.
+
+| Dual side-by-side (Turbo) | MSX-style edge fusion (Inferno, °C) |
+| :---: | :---: |
+| <img src="docs/images/screenshot-dual.jpg" width="400" alt="Dual side-by-side view: thermal on the left, visible-light camera on the right"> | <img src="docs/images/screenshot-msx.jpg" width="400" alt="MSX-style edge fusion view in the Inferno palette with Celsius readouts"> |
+| **Alpha blend (Ironbow)** | **Visual camera** |
+| <img src="docs/images/screenshot-alpha.jpg" width="400" alt="Alpha blend of thermal and visible-light images"> | <img src="docs/images/screenshot-visual.jpg" width="400" alt="Raw visible-light camera view"> |
+
+**All eight palettes:**
+
+<img src="docs/images/screenshot-palettes.jpg" width="800" alt="The same thermal frame in Ironbow, Inferno, Turbo, Jet, Hot, White-Hot, Black-Hot and Ocean palettes">
+
 ---
 
 ## 5. Troubleshooting
@@ -166,7 +186,7 @@ python flir_app.py --calib path/to/calib.rsc --snapshot-dir path/to/output
 ├── docs/
 │   ├── LICENSE               # CC BY-SA 4.0 (documentation and diagrams)
 │   ├── DEVICE_AND_SYSTEM_ARCHITECTURE.md   # Hardware, NAND, firmware and protocol reference
-│   └── images/               # Board layout diagrams (work in progress)
+│   └── images/               # Board layout diagrams (work in progress) and README screenshots
 ├── flir_app.py               # PyQt6 viewer (entry point)
 ├── flir_usb.py               # Streamer: transport selection, worker, drain and watchdog threads, mock stream
 ├── winusb_backend.py         # Native Windows WinUSB backend (ctypes, overlapped I/O)
