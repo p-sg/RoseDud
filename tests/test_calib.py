@@ -3,12 +3,17 @@
 import os
 
 import numpy as np
+import pytest
 
 from flir_calib import FlirCalibration
 
 CALIB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "calib.rsc")
 
 
+@pytest.mark.skipif(
+    not os.path.isfile(CALIB_PATH),
+    reason="calib.rsc not present (gitignored; copy from device for this check)",
+)
 def test_calib_rsc_planck_and_fusion_constants():
     c = FlirCalibration(CALIB_PATH)
     assert (c.R, c.B, c.F, c.J0, c.J1) == (16728.0, 1431.1, 1.0, 3027.0, 77.408089)
