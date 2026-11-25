@@ -344,12 +344,26 @@ class WinUsbTransport:
             result[label] = get_interface_path(guid) is not None
         return result
 
-    def _activate_interface(self, index: int, delay_sec: float = 0.2) -> bool:
-        ok = self.intf0.control_transfer(0x01, 0x0B, 1, index)
-        self.log_fn(f"[WinUSB] SET_INTERFACE({index},1)={ok}")
+    def _set_interface(self, index: int, alt: int, delay_sec: float = 0.2) -> bool:
+        """USB SET_INTERFACE (bmRequestType=0x01, bRequest=0x0B)."""
+        ok = self.intf0.control_transfer(0x01, 0x0B, alt, index)
+        self.log_fn(f"[WinUSB] SET_INTERFACE({index},{alt})={ok}")
         if ok and delay_sec > 0:
             time.sleep(delay_sec)
         return ok
+
+    def _activate_interface(self, index: int, delay_sec: float = 0.2) -> bool:
+        return self._set_interface(index, 1, delay_sec=delay_sec)
+
+    def _wait_for_sled_information(self, timeout_s: float) -> bool:
+        if self.link_mgr is None:
+            return False
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.link_mgr.sled_info is not None:
+                return True
+            time.sleep(0.05)
+        return self.link_mgr.sled_info is not None
 
     def connect(self, timeout_sec: float = 15.0) -> bool:
         t0 = time.time()
@@ -382,6 +396,11 @@ class WinUsbTransport:
             self.log_fn("[WinUSB] iAP2 link handshake timed out")
             return False
 
+        # Cycle bulk interfaces through alt 0 then 1 so a re-connect still gets
+        # sledInformation (SET_INTERFACE(1,1) while already active is a no-op).
+        self._set_interface(2, 0, delay_sec=0.1)
+        self._set_interface(1, 0, delay_sec=0.2)
+
         if not self._activate_interface(1, delay_sec=0.5):
             self.log_fn("[WinUSB] Failed to activate Interface 1 (FileIO)")
             return False
@@ -405,10 +424,23 @@ class WinUsbTransport:
         self.intf2.set_alt_setting(1)
         self.intf2.reset_pipe(EP_FRAME_IN)
         self.log_fn(f"[WinUSB] Interface 2 active: {self.intf2.path}")
-        
-        # We will start the EAP Protocol 1 and 2 sessions in connect() AFTER
-        # the iAP2 handshake (Protocol 0) is fully negotiated.
-        time.sleep(0.5)
+
+        if not self._wait_for_sled_information(5.0):
+            self.log_fn(
+                "[WinUSB] No sledInformation after UP; re-cycling FileIO interface"
+            )
+            self._set_interface(1, 0, delay_sec=0.3)
+            self._set_interface(1, 1, delay_sec=0.5)
+            if self.intf1.is_open:
+                self.intf1.set_alt_setting(1)
+                self.intf1.reset_pipe(EP_FILEIO_IN)
+            if not self._wait_for_sled_information(5.0):
+                self.log_fn(
+                    "[WinUSB] WARNING: still no sledInformation — FileIO may fail"
+                )
+        else:
+            mode = self.link_mgr.sled_info.get("operatingMode")
+            self.log_fn(f"[WinUSB] sledInformation OK (mode={mode})")
 
         return True
 
@@ -424,6 +456,9 @@ class WinUsbTransport:
 
     def close(self) -> None:
         if self.link_mgr:
+            # Do not send 0xEA01 here — stopping the command session while USB stays
+            # attached leaves the sled silent (no SYN) until a power cycle. Stale
+            # EA recovery on the next connect sends EA01 then EA00 instead.
             self.link_mgr.running = False
             # Ensure background iAP2 thread stops before freeing WinUSB handles.
             try:
@@ -431,6 +466,13 @@ class WinUsbTransport:
             except Exception:
                 pass
             self.link_mgr = None
+        # Idle bulk interfaces; command EA session remains for the next host.
+        if self.intf0.is_open:
+            try:
+                self._set_interface(2, 0, delay_sec=0.05)
+                self._set_interface(1, 0, delay_sec=0.1)
+            except Exception:
+                pass
         self.intf2.close()
         self.intf1.close()
         self.intf0.close()

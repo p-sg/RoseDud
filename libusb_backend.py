@@ -102,19 +102,38 @@ class LibUsbTransport:
             self.log_fn("[libusb] iAP2 link handshake timed out")
             return False
 
-        try:
-            self.dev.set_interface_altsetting(interface=1, alternate_setting=1)
-            self.log_fn("[libusb] Interface 1 AltSetting 1 active")
-        except Exception as e:
-            self.log_fn(f"[libusb] SET_INTERFACE(1,1): {e}")
+        # Cycle alt 0->1 so a re-connect still gets sledInformation when the prior
+        # host left FileIO already active (SET_INTERFACE(1,1) alone is then a no-op).
+        for index, alt in ((2, 0), (1, 0), (1, 1), (2, 1)):
+            try:
+                self.dev.set_interface_altsetting(interface=index, alternate_setting=alt)
+                self.log_fn(f"[libusb] SET_INTERFACE({index},{alt}) OK")
+            except Exception as e:
+                self.log_fn(f"[libusb] SET_INTERFACE({index},{alt}): {e}")
+            time.sleep(0.15)
 
-        time.sleep(0.1)
-
-        try:
-            self.dev.set_interface_altsetting(interface=2, alternate_setting=1)
-            self.log_fn("[libusb] Interface 2 AltSetting 1 active")
-        except Exception as e:
-            self.log_fn(f"[libusb] SET_INTERFACE(2,1): {e}")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if self.link_mgr.sled_info is not None:
+                break
+            time.sleep(0.05)
+        if self.link_mgr.sled_info is None:
+            self.log_fn("[libusb] No sledInformation; re-cycling FileIO interface")
+            for alt in (0, 1):
+                try:
+                    self.dev.set_interface_altsetting(interface=1, alternate_setting=alt)
+                    self.log_fn(f"[libusb] SET_INTERFACE(1,{alt}) OK")
+                except Exception as e:
+                    self.log_fn(f"[libusb] SET_INTERFACE(1,{alt}): {e}")
+                time.sleep(0.3)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and self.link_mgr.sled_info is None:
+                time.sleep(0.05)
+        if self.link_mgr.sled_info is not None:
+            mode = self.link_mgr.sled_info.get("operatingMode")
+            self.log_fn(f"[libusb] sledInformation OK (mode={mode})")
+        else:
+            self.log_fn("[libusb] WARNING: still no sledInformation — FileIO may fail")
 
         return True
 
@@ -136,6 +155,8 @@ class LibUsbTransport:
 
     def close(self) -> None:
         if self.link_mgr:
+            # Avoid 0xEA01 on close — it leaves the sled without SYN until reboot.
+            # Stale-session recovery on the next connect sends EA01 then EA00.
             self.link_mgr.running = False
             # Ensure background iAP2 thread stops before disposing the device.
             try:
@@ -145,6 +166,12 @@ class LibUsbTransport:
             self.link_mgr = None
         if self.dev:
             try:
+                for index in (2, 1):
+                    try:
+                        self.dev.set_interface_altsetting(interface=index, alternate_setting=0)
+                        self.log_fn(f"[libusb] SET_INTERFACE({index},0) OK")
+                    except Exception:
+                        pass
                 import usb.util
                 for intf in (0, 1, 2):
                     try:
