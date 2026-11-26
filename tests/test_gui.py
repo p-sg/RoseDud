@@ -75,3 +75,36 @@ def test_render_all_modes_and_snapshot(viewer, tmp_path):
     viewer._save_snapshot()
     names = sorted(p.suffix for p in tmp_path.iterdir())
     assert names == [".csv", ".jpg", ".png"]
+
+
+def test_manual_shutter_ffc_prompt(viewer):
+    """Gen 1 shutter is manual; prompt the user to close it when FFC is needed."""
+    streamer = viewer.streamer
+    streamer.connect()
+    streamer.start()
+    try:
+        frame = streamer.get_latest_frame(timeout=2.0)
+    finally:
+        streamer.stop()
+    assert frame is not None
+
+    frame.shutter_state = "ON"
+    frame.ffc_state = "FFC_DESIRED"
+    frame.telemetry = {"row_a": {"ffc_desired": True, "ffc_state": "complete"}}
+    viewer._update_ffc_shutter_prompt(frame)
+    assert viewer.lbl_calib_warning.isVisible()
+    assert "SLIDE THE SHUTTER CLOSED" in viewer.lbl_calib_warning.text()
+
+    frame.shutter_state = "FFC"
+    frame.ffc_state = "FFC_PROGRESS"
+    viewer._update_ffc_shutter_prompt(frame)
+    assert "KEEP SHUTTER CLOSED" in viewer.lbl_calib_warning.text()
+
+    frame.ffc_state = "FFC_VALID_RAD"
+    viewer._update_ffc_shutter_prompt(frame)
+    assert "MAY OPEN THE SHUTTER" in viewer.lbl_calib_warning.text()
+
+    frame.shutter_state = "ON"
+    frame.telemetry = {"row_a": {"ffc_desired": False, "ffc_state": "complete"}}
+    viewer._update_ffc_shutter_prompt(frame)
+    assert viewer.lbl_calib_warning.isHidden()

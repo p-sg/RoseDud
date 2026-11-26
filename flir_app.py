@@ -455,21 +455,23 @@ class FlirViewerApp(QMainWindow):
         self.slider_alpha.valueChanged.connect(self._on_alpha_changed)
         tuning_layout.addWidget(self.slider_alpha)
         
-        self.lbl_offset = QLabel(f"Temp Offset: {getattr(self.calib, 'dynamic_offset', 5928)}")
-        tuning_layout.addWidget(self.lbl_offset)
-        self.slider_offset = QSlider(Qt.Orientation.Horizontal)
-        self.slider_offset.setRange(-1000, 7000)
-        self.slider_offset.setValue(int(getattr(self.calib, 'dynamic_offset', 5928)))
-        self.slider_offset.valueChanged.connect(self._on_offset_changed)
-        tuning_layout.addWidget(self.slider_offset)
-        
-        self.lbl_gain = QLabel(f"Temp Gain: {getattr(self.calib, 'linear_gain', 64)}")
-        tuning_layout.addWidget(self.lbl_gain)
-        self.slider_gain = QSlider(Qt.Orientation.Horizontal)
-        self.slider_gain.setRange(10, 150)
-        self.slider_gain.setValue(int(getattr(self.calib, 'linear_gain', 64)))
-        self.slider_gain.valueChanged.connect(self._on_gain_changed)
-        tuning_layout.addWidget(self.slider_gain)
+        eps_pct = int(round(float(getattr(self.calib, "emissivity", 1.0)) * 100))
+        self.lbl_emissivity = QLabel(f"Emissivity: {eps_pct / 100.0:.2f}")
+        tuning_layout.addWidget(self.lbl_emissivity)
+        self.slider_emissivity = QSlider(Qt.Orientation.Horizontal)
+        self.slider_emissivity.setRange(50, 100)
+        self.slider_emissivity.setValue(eps_pct)
+        self.slider_emissivity.valueChanged.connect(self._on_emissivity_changed)
+        tuning_layout.addWidget(self.slider_emissivity)
+
+        refl_c = float(getattr(self.calib, "reflected_temp_k", 293.15)) - 273.15
+        self.lbl_refl = QLabel(f"Reflected Temp: {self._format_temp(refl_c)}")
+        tuning_layout.addWidget(self.lbl_refl)
+        self.slider_refl = QSlider(Qt.Orientation.Horizontal)
+        self.slider_refl.setRange(-20, 50)
+        self.slider_refl.setValue(int(round(refl_c)))
+        self.slider_refl.valueChanged.connect(self._on_refl_changed)
+        tuning_layout.addWidget(self.slider_refl)
         
         tuning_group.setLayout(tuning_layout)
         sidebar_layout.addWidget(tuning_group)
@@ -485,15 +487,14 @@ class FlirViewerApp(QMainWindow):
         self.alpha_blend_weight = val / 100.0
         self.lbl_alpha.setText(f"Alpha Blend Weight: {self.alpha_blend_weight:.2f}")
         
-    def _on_offset_changed(self, val):
-        if hasattr(self.calib, 'dynamic_offset'):
-            self.calib.dynamic_offset = float(val)
-            self.lbl_offset.setText(f"Temp Offset: {self.calib.dynamic_offset}")
-            
-    def _on_gain_changed(self, val):
-        if hasattr(self.calib, 'linear_gain'):
-            self.calib.linear_gain = float(val)
-            self.lbl_gain.setText(f"Temp Gain: {self.calib.linear_gain}")
+    def _on_emissivity_changed(self, val):
+        self.calib.emissivity = max(val / 100.0, 0.001)
+        self.lbl_emissivity.setText(f"Emissivity: {self.calib.emissivity:.2f}")
+
+    def _on_refl_changed(self, val):
+        self.calib.reflected_temp_k = float(val) + 273.15
+        self.calib.atmospheric_temp_k = self.calib.reflected_temp_k
+        self.lbl_refl.setText(f"Reflected Temp: {self._format_temp(float(val))}")
 
     def _on_view_mode_changed(self, idx):
         self.view_mode_idx = idx
@@ -503,6 +504,9 @@ class FlirViewerApp(QMainWindow):
         
     def _on_celsius_toggled(self, checked):
         self.temp_unit_celsius = checked
+        self.lbl_refl.setText(
+            f"Reflected Temp: {self._format_temp(self.calib.reflected_temp_k - 273.15)}"
+        )
         
     def _on_crosshairs_toggled(self, checked):
         self.show_crosshairs = checked
@@ -647,31 +651,21 @@ class FlirViewerApp(QMainWindow):
             min_pt = (int((min_loc[1] + 0.5) * scale_x), int((min_loc[0] + 0.5) * scale_y))
             center_pt = (240, 320)
             
-            self._draw_crosshair(main_canvas, max_pt, (0, 0, 255), f"MAX: {self._format_temp(frame_max)}")
-            self._draw_crosshair(main_canvas, min_pt, (255, 255, 0), f"MIN: {self._format_temp(frame_min)}")
-            self._draw_crosshair(main_canvas, center_pt, (255, 255, 255), f"CTR: {self._format_temp(frame.center_temp_c)}")
+            uncal = "" if frame.temps_calibrated else " (uncal)"
+            self._draw_crosshair(main_canvas, max_pt, (0, 0, 255), f"MAX: {self._format_temp(frame_max)}{uncal}")
+            self._draw_crosshair(main_canvas, min_pt, (255, 255, 0), f"MIN: {self._format_temp(frame_min)}{uncal}")
+            self._draw_crosshair(main_canvas, center_pt, (255, 255, 255), f"CTR: {self._format_temp(frame.center_temp_c)}{uncal}")
 
-        is_closed = frame.shutter_state.lower() in ("closed", "ffc")
-        if is_closed:
-            if "VALID" in frame.ffc_state.upper() or "APPROX" in frame.ffc_state.upper():
-                # The UI redraws faster than frames arrive; feed each frame to FFC once.
-                if self._new_frame:
-                    self.calib.perform_ffc(frame.thermal_raw, frame.shutter_temp_k)
-                self.lbl_calib_warning.setText("CALIBRATION COMPLETE! YOU MAY OPEN SHUTTER")
-                self.lbl_calib_warning.setStyleSheet("color: white; background-color: #2e7d32; padding: 5px; border-radius: 5px;")
-                self.lbl_calib_warning.show()
-                self.slider_offset.setValue(int(getattr(self.calib, 'dynamic_offset', 5928)))
-            else:
-                self.lbl_calib_warning.setText("CALIBRATING... KEEP SHUTTER CLOSED")
-                self.lbl_calib_warning.setStyleSheet("color: white; background-color: #c62828; padding: 5px; border-radius: 5px;")
-                self.lbl_calib_warning.show()
-        else:
-            if "VALID" not in frame.ffc_state.upper() and "APPROX" not in frame.ffc_state.upper():
-                self.lbl_calib_warning.setText("CALIBRATION NEEDED: PLEASE SLIDE SHUTTER CLOSED")
-                self.lbl_calib_warning.setStyleSheet("color: white; background-color: #ef6c00; padding: 5px; border-radius: 5px;")
-                self.lbl_calib_warning.show()
-            else:
-                self.lbl_calib_warning.hide()
+        # Shutter-offset fallback: re-estimate its offset from each new closed-shutter
+        # frame after a valid FFC (no effect on the RBFO path). The UI redraws faster
+        # than frames arrive, so feed each frame once.
+        ffc_state = (frame.ffc_state or "").upper()
+        shutter_closed = (frame.shutter_state or "").lower() in ("closed", "ffc")
+        if self._new_frame and shutter_closed and ("VALID" in ffc_state or "APPROX" in ffc_state):
+            self.calib.perform_ffc(frame.thermal_raw, frame.shutter_temp_k)
+
+        # Gen 1 shutter is manual (no actuator); prompt when the Lepton wants an FFC.
+        self._update_ffc_shutter_prompt(frame)
 
         if 0 <= self.cursor_x < active_w and 0 <= self.cursor_y < active_h:
             # In side-by-side mode the right half is the visual image; map it
@@ -684,7 +678,8 @@ class FlirViewerApp(QMainWindow):
             cv2.drawMarker(main_canvas, (self.cursor_x, self.cursor_y), (0, 255, 0), cv2.MARKER_TILTED_CROSS, 20, 2)
             cv2.circle(main_canvas, (self.cursor_x, self.cursor_y), 8, (0, 255, 0), 1)
             
-            txt = f"{self._format_temp(spot_temp)} (raw: {raw_thm[thm_px_y, thm_px_x]})"
+            uncal = "" if frame.temps_calibrated else " uncal"
+            txt = f"{self._format_temp(spot_temp)}{uncal} (raw: {raw_thm[thm_px_y, thm_px_x]})"
             (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
             bx, by = self.cursor_x + 12, max(25, self.cursor_y - 12)
             cv2.rectangle(main_canvas, (bx - 4, by - th - 4), (bx + tw + 4, by + 6), (20, 20, 20), -1)
@@ -692,6 +687,39 @@ class FlirViewerApp(QMainWindow):
             cv2.putText(main_canvas, txt, (bx, by), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
         return main_canvas
+
+    def _update_ffc_shutter_prompt(self, frame: RosebudFrame) -> None:
+        """Banner prompting a manual shutter close when an FFC is needed."""
+        ffc = (frame.ffc_state or "").upper()
+        shutter = (frame.shutter_state or "").lower()
+        closed = shutter in ("closed", "ffc")
+        row_a = (frame.telemetry or {}).get("row_a") or {}
+        desired = bool(row_a.get("ffc_desired")) or "DESIRED" in ffc
+        invalid = "INVALID" in ffc or ffc in ("", "UNKNOWN")
+        in_progress = "PROGRESS" in ffc
+        radiometric = any(s in ffc for s in ("VALID", "APPROX"))
+
+        warn = self.lbl_calib_warning
+        if closed and (in_progress or not radiometric):
+            warn.setText("CALIBRATING... KEEP SHUTTER CLOSED")
+            warn.setStyleSheet(
+                "color: white; background-color: #c62828; padding: 5px; border-radius: 5px;"
+            )
+            warn.show()
+        elif closed and radiometric:
+            warn.setText("CALIBRATION COMPLETE - YOU MAY OPEN THE SHUTTER")
+            warn.setStyleSheet(
+                "color: white; background-color: #2e7d32; padding: 5px; border-radius: 5px;"
+            )
+            warn.show()
+        elif desired or invalid or not frame.temps_calibrated:
+            warn.setText("CALIBRATION NEEDED - SLIDE THE SHUTTER CLOSED")
+            warn.setStyleSheet(
+                "color: white; background-color: #ef6c00; padding: 5px; border-radius: 5px;"
+            )
+            warn.show()
+        else:
+            warn.hide()
 
     def _draw_crosshair(self, img: np.ndarray, pt: Tuple[int, int], color: Tuple[int, int, int], label: str) -> None:
         x, y = pt
@@ -713,11 +741,19 @@ class FlirViewerApp(QMainWindow):
         if frame is not None:
             self.lbl_frame_idx.setText(f"Frame: #{frame.sequence}")
             
-            if hasattr(self.calib, 'dynamic_offset'):
-                self.lbl_calib_info.setText(
-                    f"Calib: Offset={int(self.calib.dynamic_offset)} Gain={int(self.calib.linear_gain)}\n"
-                    f"Planck: R={int(getattr(self.calib, 'R', 0))} B={int(getattr(self.calib, 'B', 0))} F={int(getattr(self.calib, 'F', 0))}"
-                )
+            c = self.calib
+            if c.using_rbfo:
+                curve = (f"RBFO: R={c.rbfo['R']:.0f} B={c.rbfo['B']:.1f} "
+                         f"F={c.rbfo['F']:.1f} O={c.rbfo['O']:.1f}")
+            else:
+                curve = (f"Shutter offset: Offset={c.dynamic_offset:.0f} Gain={c.linear_gain:.0f}\n"
+                         f"Planck: R={c.rsc_R:.0f} B={c.rsc_B:.1f} F={c.rsc_F:.1f}")
+            self.lbl_calib_info.setText(
+                f"{curve}\n"
+                f"ε={c.emissivity:.2f}  T_refl={self._format_temp(c.reflected_temp_k - 273.15)}"
+                + ("  LCF on (experimental)" if c.lcf_active else "")
+                + ("" if frame.temps_calibrated else "\nNot calibrated yet: close the shutter")
+            )
             
             tk = frame.shutter_temp_k
             tc = tk - 273.15
@@ -863,6 +899,12 @@ def main():
     parser.add_argument("--mock", action="store_true", help="Run with synthetic thermal stream (for offline testing)")
     parser.add_argument("--calib", type=str, default=os.path.join(APP_DIR, "calib.rsc"),
                         help="Path to calib.rsc (default: next to this script)")
+    parser.add_argument("--lcf", type=str, default="",
+                        help="EXPERIMENTAL: path to *_LCFMap.fff for FLIR's lens correction "
+                             "(crops about a quarter of the field of view on the Gen 1)")
+    parser.add_argument("--radiometry", choices=("auto", "shutter-offset"), default="auto",
+                        help="auto: Lepton RBFO from telemetry, shutter-offset model until it arrives "
+                             "(default); shutter-offset: always use the shutter-offset model")
     parser.add_argument("--snapshot-dir", type=str, default=os.path.join(APP_DIR, "snapshots"),
                         help="Where snapshots are saved (default: snapshots/ next to this script)")
     parser.add_argument("--debug", action="store_true", help="Enable verbose debug logging")
@@ -870,7 +912,16 @@ def main():
     
     if not os.path.exists(args.calib):
         print(f"[Notice]: calibration file not found at {args.calib}; using built-in defaults.")
-    calib = FlirCalibration(args.calib if os.path.exists(args.calib) else None)
+    lcf_path = args.lcf if args.lcf and os.path.exists(args.lcf) else None
+    if args.lcf and lcf_path is None:
+        print(f"[Notice]: LCF map not found at {args.lcf}; continuing without it.")
+    calib = FlirCalibration(
+        args.calib if os.path.exists(args.calib) else None,
+        lcf_path=lcf_path,
+        mode="shutter_offset" if args.radiometry == "shutter-offset" else "auto",
+    )
+    if lcf_path:
+        print(f"[Notice]: loaded LCF map from {lcf_path} (experimental)")
     streamer = FlirUsbStreamer(calib=calib, mock_mode=args.mock, full_startup=True, debug=args.debug)
     
     if not args.mock:

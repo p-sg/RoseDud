@@ -392,35 +392,64 @@ Every frame transmitted over **Endpoint `0x85` Bulk IN** conforms to the proprie
 ## 8. Radiometric Temperature Conversion & Optical Fusion
 
 ### 8.1 What the Raw Pixels Are
-The Gen 1's Lepton 1.x does **not** output temperature directly: its 14-bit pixel values are uncalibrated sensor counts. They are **not** centikelvin (Lepton 3.5 "TLinear" mode does not apply here). Turning counts into temperature takes the factory Planck constants plus an offset taken from the shutter.
+The Gen 1's Lepton outputs 14-bit sensor counts, not temperature: they are **not** centikelvin (Lepton 3.5 "TLinear" mode does not apply here). After the Lepton's own flat-field correction (FFC) against the closed shutter, though, those counts sit on a radiometric curve that the sled writes to the Lepton and that the Lepton reports back in VoSPI telemetry Row B.
 
-### 8.2 Planck Constants (`calib.rsc`)
-`calib.rsc` (from the JFFS2 calibration partition, a plain-text FLIR resource file) contains the factory Planck constants for this lens and temperature range (`ds120C_weRB_apNOA_fiNOF_leExFOL2`, −40 °C to 120 °C):
+### 8.2 Row B RBFO (Default Conversion)
+Row B words 3–10 carry the Lepton's RBFO parameters (R, B, F, O), which are specific to each unit. For every frame, `FlirCalibration` (`flir_calib.py`) takes them from the parsed telemetry and converts:
+
+$$S = \text{raw} - O \qquad T_{\text{K}} = \frac{B}{\ln\left(\frac{R}{S_{\text{obj}}} + F\right)} \qquad T_{^\circ\text{C}} = T_{\text{K}} - 273.15$$
+
+with the emissivity $\varepsilon$ and reflected temperature set in the UI (atmospheric transmission $\tau = 1$ for now):
+
+$$S_{\text{obj}} = \frac{S - (1-\varepsilon)\,\tau\,S(T_{\text{refl}}) - (1-\tau)\,S(T_{\text{atm}})}{\varepsilon\,\tau} \qquad S(T) = \frac{R}{e^{B/T} - F}$$
+
+With $\varepsilon = 1$ and $\tau = 1$, $S_{\text{obj}} = S$.
+
+Why this curve: at every FFC, Row B word 1 equals ⌊RBFO(shutter temperature)⌋ exactly, and the mean of a closed-shutter frame converts back to the shutter temperature within about 0.1 °C.
+
+The curve only applies after the Lepton's first FFC since power-up (until then Row B word 2 holds a 300.00 K placeholder). Before it, readings were about 20 °C off in a live capture, so the app marks them *uncal*.
+
+> **Accuracy caveat:** this has been checked against two references only: a wall near room temperature (within about 0.1 °C) and an ice bath (about 1.5 °C high with $\varepsilon = 1$, about 0.5 °C with $\varepsilon = 0.96$; that figure depends on the assumed emissivity and reflected temperature). It has not been checked against a blackbody or above room temperature, and drift between shutter cycles has not been measured. Treat readings as approximate (a degree or two).
+
+### 8.3 `calib.rsc` Constants
+`calib.rsc` (from the JFFS2 calibration partition, a plain-text FLIR resource file) also contains Planck constants for this lens and temperature range (`ds120C_weRB_apNOA_fiNOF_leExFOL2`, −40 °C to 120 °C):
 
 ```
 .calib.extRBFCalc.curData.cProt.ds120C_weRB_apNOA_fiNOF_leExFOL2.const text "R 16728, B 1431.1, F 1.00 (J0 3027, J1 77.408089)"
 ```
 
-`FlirCalibration` (`flir_calib.py`) parses R, B, F, J0 and J1 from this string. J0 and J1 are parsed but not currently used.
-
-### 8.3 Conversion Used by RoseDud
-`FlirCalibration.raw_to_celsius`:
-
-$$S = \frac{\text{raw} - O}{G} \qquad T_{\text{K}} = \frac{B}{\ln\left(\frac{R}{S} + F\right)} \qquad T_{^\circ\text{C}} = T_{\text{K}} - 273.15$$
-
-* $G$ (gain) = 25 counts per signal unit: an empirical value, adjustable in the UI ("Temp Gain").
-* $O$ (offset) starts at 3200 and is re-estimated from the shutter (§8.4). It is also adjustable in the UI ("Temp Offset").
-* $S$ is clamped to ≥ 1 to keep the logarithm defined.
+`FlirCalibration` parses R, B, F, J0 and J1 (preferring the unrounded `.calib.extRBF.ds120C_weRB_apNOA_fiNOF_leExFOL2.*` values). These belong to FLIR's host-side processing, not to the Lepton. Converting raw counts with J0/J1 did not match the two-point check (about 100 °C off on raw counts, about 4 °C off at 0 °C on raw × 4), so RoseDud uses these constants only for the shutter-offset fallback (§8.4).
 
 ### 8.4 Shutter-Based Offset Calibration (FFC)
-When the metadata says the shutter is `closed` and `ffcState` is valid or approximate, the shutter is a uniform blackbody at the known `shutterTemperature` $T_s$. `FlirCalibration.perform_ffc` then:
-1. Computes the shutter's expected signal: $S_s = R / (e^{B/T_s} - F)$.
-2. Computes the offset that maps the mean raw frame onto it: $O = \overline{\text{raw}} - G \cdot S_s$.
-3. Rejects estimates more than 150 counts from the running median (the shutter is mid-slide), and averages the last 15.
+The Gen 1 shutter is manual. When the sled wants an FFC (`ffcState` is `FFC_DESIRED`, or Row A's "FFC desired" bit is set), the app asks the user to slide the shutter closed and hold it. The Lepton then runs its own FFC, which is what puts the raw counts on the RBFO curve (§8.2).
 
-> **Accuracy caveat:** the gain and offset model is empirical and was fitted by hand. It has not been checked against a reference blackbody, and emissivity and reflected temperature are not applied yet. Treat readings as approximate (a few °C).
+RoseDud keeps its earlier host-side model as a fallback. It is used until Row B RBFO values have been seen, or always with `--radiometry shutter-offset`. It uses the §8.3 Planck constants with an empirical gain:
 
-### 8.5 MSX-Style Edge Fusion & Parallax
+$$S = \frac{\text{raw} - O}{G}$$
+
+* $G$ (gain) = 25 counts per signal unit: an empirical value.
+* $O$ (offset) starts at 3200. Whenever the shutter is closed and `ffcState` is valid or approximate, `FlirCalibration.perform_ffc` treats the shutter as a uniform blackbody at the known `shutterTemperature` $T_s$ and:
+  1. Computes the shutter's expected signal: $S_s = R / (e^{B/T_s} - F)$.
+  2. Computes the offset that maps the mean raw frame onto it: $O = \overline{\text{raw}} - G \cdot S_s$.
+  3. Rejects estimates more than 150 counts from the running median (the shutter is mid-slide), and averages the last 15.
+
+The rest of the conversion is the same as in §8.2. This model was fitted by hand; in the two-point check it read about 0.6 °C high on the wall and 3.5 °C high on the ice bath.
+
+### 8.5 Lens Correction Map (Experimental)
+`calib.rsc` names a lens-correction file, `ds_we_ap_fi_leExFOL2_LCFMap.fff`, which is inside `CameraFiles.zip`. It is a FLIR FFF container. Its index entry with tag `0x14` holds a 32-byte header (2 bytes per entry, 26 × 18 entries, fraction bits in byte 29, where 0 means 10) followed by signed 16-bit fixed-point values. Each row interleaves (dx, dy) pairs, giving a 13 × 18 grid of displacement vectors.
+
+How FLIR's own software applies it:
+* The grid is spread over the image with (columns − 2) and (rows − 2) intervals, so the last column and row only serve as the far interpolation neighbor at the right and bottom edges.
+* The values are displacements in pixels of the frame the correction is applied to, before any resizing.
+* Each output pixel samples the input at $(x + d_x,\ y + d_y)$, bilinearly.
+* The map is stored in portrait orientation. FLIR's software only rotates it for the FLIR ONE Edge models; the phone-case models get it as stored, so on the Gen 1 it applies to the 60 × 80 portrait frame. Applied to the sensor's 80 × 60 orientation, it squashes round objects into ellipses.
+* FLIR's software does not use the `rotation` (0.1657) and `zoom` (5.7087) values next to the file name in `calib.rsc`; they are probably the parameters the map was generated from.
+
+On the Gen 1 the map is mostly a zoom of about 1.34 × 1.39 (it keeps roughly x 8–52 and y 12–69 of the 60 × 80 frame) plus a rotation of about 0.45°, with at most about 1 pixel of non-linear distortion. Applying it therefore discards about a quarter of the field of view, although the raw image is usable to its edges. FLIR's current software does not support the Gen 1, so whether the portrait frame is the sensor frame rotated clockwise (as the app shows it) or counter-clockwise is not confirmed; RoseDud uses clockwise.
+
+`flir_lcf.py` implements this. It is off by default; `--lcf path/to/map.fff` turns it on. It remaps the temperature image only; the raw counts stay as the sensor delivered them.
+
+### 8.6 MSX-Style Edge Fusion & Parallax
 The thermal and visual lenses sit a few millimeters apart, so the two images need aligning.
 
 What the app does today (`flir_app.py`, `_generate_msx_fusion`):
@@ -446,9 +475,8 @@ These are the values from one unit; other units may differ.
 
 ## 9. Open Questions & Ideas for Contributors
 * **Factory fusion alignment.** Work out how `C0X/C1X/C1Y/magnQuote/rotAngle` map onto an affine transform (and how the fusion distance changes it), then replace the manual XY pad.
-* **Telemetry rows.** Decode VoSPI packets 60–62 (FPA and housing temperature, frame counter, FFC state), which the parser currently keeps as hex.
-* **Radiometry.** Fit the gain properly against a blackbody or reference thermometer; add emissivity and reflected-temperature compensation; find out what J0/J1 are for.
-* **FileIO protocol (EP `0x04` / `0x83`).** Work out its message format. It probably carries calibration files and firmware updates.
+* **Radiometry.** Check the RBFO conversion (§8.2) against a blackbody or more reference temperatures, especially above room temperature, and measure how far readings drift between shutter cycles.
+* **Lens correction.** Decide whether the Gen 1 should use the LCF map at all, given its large crop, and confirm the portrait rotation direction (§8.5), for example by checking thermal/visual alignment.
 * **Lepton CCI.** Find out whether the config session can pass Lepton CCI commands through (for example, running an FFC while the user holds the shutter closed, or reading telemetry settings).
 * **Firmware route.** Replace `usbiap2_poc` in the initramfs with a standard Linux UVC gadget, so the case shows up as a normal webcam with no host software. This needs repacking the uImage and reflashing it over UART/U-Boot.
 * **Linux/macOS testing.** The libusb backend has seen far less testing than WinUSB.
