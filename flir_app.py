@@ -16,15 +16,17 @@ import cv2
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QComboBox, QCheckBox, QFrame,
-    QSizePolicy, QSlider, QGroupBox, QScrollArea
+    QSizePolicy, QSlider, QGroupBox, QScrollArea, QDialog, QTabWidget,
+    QFormLayout,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint
 from PyQt6.QtGui import QImage, QPixmap, QFont, QPainter, QPen, QColor, QBrush
 import qdarkstyle
 
 from flir_calib import FlirCalibration
-from flir_protocol import RosebudFrame
+from flir_protocol import RosebudFrame, format_duration_ms, telemetry_display_rows
 from flir_usb import FlirUsbStreamer
+from iap2 import format_charging_state
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -74,6 +76,118 @@ def generate_ironbow_lut() -> np.ndarray:
     return lut
 
 IRONBOW_LUT = generate_ironbow_lut()
+
+
+class VospiTelemetryDialog(QDialog):
+    """Non-modal live view of decoded VoSPI Rows A/B.
+
+    Builds the form once, then only updates changed value labels at ~4 Hz so
+    the main viewer FPS is not tanked by QWidget churn.
+    """
+
+    _GROUP_TITLES = {"A": "Row A — Sensor", "B": "Row B — Gen 1 (partly identified)"}
+    _GROUP_ORDER = ("A", "B")
+    _MIN_INTERVAL_S = 0.25
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("VoSPI Telemetry")
+        self.setMinimumSize(520, 560)
+        self.resize(560, 640)
+        self.setModal(False)
+
+        layout = QVBoxLayout(self)
+        self.hint = QLabel("Waiting for frames…")
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        self._value_labels: dict[tuple[str, str], QLabel] = {}
+        self._last_values: dict[tuple[str, str], str] = {}
+        self._built = False
+        self._last_update_monotonic = 0.0
+        self.use_celsius = True
+
+    def _ensure_fields(self, rows: list) -> None:
+        if self._built:
+            return
+        forms: dict[str, QFormLayout] = {}
+        for group in self._GROUP_ORDER:
+            page = QWidget()
+            form = QFormLayout(page)
+            form.setContentsMargins(12, 12, 12, 12)
+            form.setSpacing(8)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+            forms[group] = form
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(page)
+            self.tabs.addTab(scroll, self._GROUP_TITLES.get(group, f"Row {group}"))
+
+        for group, field, _value in rows:
+            form = forms.get(group)
+            if form is None:
+                continue
+            value_lbl = QLabel("—")
+            value_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            value_lbl.setWordWrap(True)
+            form.addRow(f"{field}:", value_lbl)
+            self._value_labels[(group, field)] = value_lbl
+        self._built = True
+
+    def update_from_frame(
+        self,
+        frame: Optional[RosebudFrame],
+        force: bool = False,
+        use_celsius: Optional[bool] = None,
+    ) -> None:
+        if use_celsius is not None and bool(use_celsius) != self.use_celsius:
+            self.use_celsius = bool(use_celsius)
+            self._last_values.clear()
+            force = True
+        elif use_celsius is not None:
+            self.use_celsius = bool(use_celsius)
+
+        now = time.monotonic()
+        if (
+            not force
+            and self._built
+            and (now - self._last_update_monotonic) < self._MIN_INTERVAL_S
+        ):
+            return
+
+        if frame is None or not frame.telemetry:
+            self.hint.setText("Waiting for frames…")
+            return
+
+        rows = telemetry_display_rows(frame.telemetry, use_celsius=self.use_celsius)
+        if not rows:
+            self.hint.setText("Frame has no decoded VoSPI telemetry yet.")
+            return
+
+        self._ensure_fields(rows)
+        self._last_update_monotonic = now
+
+        row_a = frame.telemetry.get("row_a") or {}
+        up_ms = int(row_a.get("uptime_ms", 0))
+        self.hint.setText(
+            f"Frame #{frame.sequence}  ·  "
+            f"Lepton frame {row_a.get('frame_counter', '--')}  ·  "
+            f"uptime {format_duration_ms(up_ms)}"
+        )
+
+        for group, field, value in rows:
+            key = (group, field)
+            if self._last_values.get(key) == value:
+                continue
+            self._last_values[key] = value
+            lbl = self._value_labels.get(key)
+            if lbl is not None:
+                lbl.setText(value)
+
 
 class XYPadWidget(QWidget):
     positionChanged = pyqtSignal(int, int)
@@ -185,6 +299,7 @@ class FlirViewerApp(QMainWindow):
         self.cursor_y = -1
         self.current_frame: Optional[RosebudFrame] = None
         self._new_frame = False
+        self._vospi_dialog: Optional[VospiTelemetryDialog] = None
 
         self.t_min_smooth = 20.0
         self.t_max_smooth = 35.0
@@ -284,11 +399,24 @@ class FlirViewerApp(QMainWindow):
         self.lbl_shutter = QLabel("Shutter Temp: -- K")
         self.lbl_batt = QLabel("Battery: -- V (--%)")
         self.lbl_shutter_state = QLabel("Shutter State: --")
+        self.lbl_sensor = QLabel("Sensor: --")
         
-        for lbl in (self.lbl_fps, self.lbl_frame_idx, self.lbl_calib_info, self.lbl_shutter, self.lbl_batt, self.lbl_shutter_state):
+        for lbl in (
+            self.lbl_fps,
+            self.lbl_frame_idx,
+            self.lbl_calib_info,
+            self.lbl_shutter,
+            self.lbl_batt,
+            self.lbl_shutter_state,
+            self.lbl_sensor,
+        ):
             lbl.setFont(QFont("Segoe UI", 9))
             lbl.setWordWrap(True)
             sidebar_layout.addWidget(lbl)
+
+        btn_vospi = QPushButton("VoSPI Telemetry…")
+        btn_vospi.clicked.connect(self._open_vospi_telemetry)
+        sidebar_layout.addWidget(btn_vospi)
             
         # Sled / Device Information Group (hidden until sledInformation is received)
         self.grp_sled_info = QGroupBox("Device Information")
@@ -571,9 +699,19 @@ class FlirViewerApp(QMainWindow):
         cv2.putText(img, label, (x + 10, y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(img, label, (x + 10, y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
 
+    def _open_vospi_telemetry(self):
+        if self._vospi_dialog is None:
+            self._vospi_dialog = VospiTelemetryDialog(self)
+        self._vospi_dialog.update_from_frame(
+            self.current_frame, force=True, use_celsius=self.temp_unit_celsius
+        )
+        self._vospi_dialog.show()
+        self._vospi_dialog.raise_()
+        self._vospi_dialog.activateWindow()
+
     def _update_telemetry(self, frame: Optional[RosebudFrame]):
         if frame is not None:
-            self.lbl_frame_idx.setText(f"Frame: #{frame.frame_index}")
+            self.lbl_frame_idx.setText(f"Frame: #{frame.sequence}")
             
             if hasattr(self.calib, 'dynamic_offset'):
                 self.lbl_calib_info.setText(
@@ -590,6 +728,43 @@ class FlirViewerApp(QMainWindow):
                 self.lbl_shutter.setText(f"Shutter Temp: {tk:.2f} K ({tf:.1f} F)")
                 
             self.lbl_shutter_state.setText(f"Shutter State: {frame.shutter_state} / {frame.ffc_state}")
+
+            row_a = (frame.telemetry or {}).get("row_a") or {}
+            if row_a:
+                fpa_k = float(row_a.get("fpa_temp_k", frame.fpa_temp_k))
+                hsg_k = float(row_a.get("housing_temp_k", frame.housing_temp_k))
+                ffc = str(row_a.get("ffc_state", "unknown")).replace("_", " ")
+                if row_a.get("ffc_desired"):
+                    ffc = f"{ffc}, desired"
+                if self.temp_unit_celsius:
+                    self.lbl_sensor.setText(
+                        f"Sensor: FPA {fpa_k - 273.15:.1f} C / "
+                        f"Housing {hsg_k - 273.15:.1f} C\nLepton FFC: {ffc}"
+                    )
+                else:
+                    fpa_f = ((fpa_k - 273.15) * 1.8) + 32.0
+                    hsg_f = ((hsg_k - 273.15) * 1.8) + 32.0
+                    self.lbl_sensor.setText(
+                        f"Sensor: FPA {fpa_f:.1f} F / Housing {hsg_f:.1f} F\n"
+                        f"Lepton FFC: {ffc}"
+                    )
+            elif frame.fpa_temp_k or frame.housing_temp_k:
+                if self.temp_unit_celsius:
+                    self.lbl_sensor.setText(
+                        f"Sensor: FPA {frame.fpa_temp_k - 273.15:.1f} C / "
+                        f"Housing {frame.housing_temp_k - 273.15:.1f} C"
+                    )
+                else:
+                    fpa_f = ((frame.fpa_temp_k - 273.15) * 1.8) + 32.0
+                    hsg_f = ((frame.housing_temp_k - 273.15) * 1.8) + 32.0
+                    self.lbl_sensor.setText(
+                        f"Sensor: FPA {fpa_f:.1f} F / Housing {hsg_f:.1f} F"
+                    )
+
+        if self._vospi_dialog is not None and self._vospi_dialog.isVisible():
+            self._vospi_dialog.update_from_frame(
+                frame, use_celsius=self.temp_unit_celsius
+            )
         
         # Battery telemetry update
         if hasattr(self.streamer, 'transport') and self.streamer.transport is not None:
@@ -599,18 +774,14 @@ class FlirViewerApp(QMainWindow):
                 p = getattr(link, 'battery_percentage', 0.0)
                 raw_s = getattr(link, 'battery_charging_state', "Unknown")
                 c = getattr(link, 'battery_charging_current', 0.0)
-                
-                state_map = {
-                    "stateNoCharging": "Not Charging",
-                    "stateManagedBatteryCharging": "Charging"
-                }
-                s = state_map.get(raw_s, raw_s.replace("state", ""))
+                s = format_charging_state(raw_s)
                 
                 if hasattr(self.streamer, 'debug') and self.streamer.debug:
                     print(f"[UI] Read battery from link_mgr: {v:.2f}V {p}% - {s} at {c}mA")
                 
                 if v > 0 or p > 0 or s != "Unknown":
-                    if s == "Charging":
+                    charging_like = "charging" in s.lower() and "fault" not in s.lower()
+                    if charging_like and c:
                         self.lbl_batt.setText(f"Battery: {v:.2f} V ({p:.0f}%) - {s} ({c} mA)")
                     else:
                         self.lbl_batt.setText(f"Battery: {v:.2f} V ({p:.0f}%) - {s}")

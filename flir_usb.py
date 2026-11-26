@@ -486,6 +486,7 @@ class FlirUsbStreamer:
 
             frame = RosebudFrame(
                 frame_index=frame_idx,
+                sequence=frame_idx,
                 thermal_raw=thermal_raw,
                 thermal_celsius=thermal_celsius,
                 visual_image=vis_img,

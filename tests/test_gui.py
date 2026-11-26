@@ -26,6 +26,14 @@ def viewer(tmp_path):
     app.processEvents()
 
 
+def test_vospi_telemetry_dialog_opens(viewer):
+    assert viewer._vospi_dialog is None
+    viewer._open_vospi_telemetry()
+    assert viewer._vospi_dialog is not None
+    assert viewer._vospi_dialog.isVisible()
+    viewer._vospi_dialog.close()
+
+
 def test_sled_info_panel_visibility(viewer):
     assert viewer.grp_sled_info.isHidden()
     viewer._update_telemetry(None)
