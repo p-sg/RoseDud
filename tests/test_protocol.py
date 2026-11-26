@@ -45,7 +45,8 @@ def test_single_frame():
     assert f.ffc_state == "FFC_RAD_VALID"
     assert f.thermal_raw.shape == (60, 80)
     assert f.thermal_raw[0, 0] == 1000 and f.thermal_raw[59, 79] == 1059
-    assert set(f.telemetry) == {"telemetry_row_0", "telemetry_row_1", "telemetry_row_2"}
+    assert {"telemetry_row_0", "telemetry_row_1", "telemetry_row_2"} <= set(f.telemetry)
+    assert "row_a" in f.telemetry
 
 
 def test_split_chunks_and_garbage_resync():

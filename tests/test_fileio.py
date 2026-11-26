@@ -71,10 +71,10 @@ def test_config_packet_round_trip_and_bad_crc():
     pkt = pack_config_packet(body)
     assert parse_config_packet(pkt)[1] == body.rstrip(b"\x00")
     assert extract_control_json(pkt)["type"] == "sledInformation"
-    # Live sled→host shape: EA prefix + JSON chunk (0x1CC may be a prior packet).
+    # Live sled->host shape: EA prefix + JSON chunk (0x1CC may be a prior packet).
     wire = struct.pack(">H", 1) + body
     assert extract_control_json(wire)["type"] == "sledInformation"
-    # EA prefix + full 0x1CC packet (host→sled / combined form).
+    # EA prefix + full 0x1CC packet (host->sled / combined form).
     assert extract_control_json(struct.pack(">H", 1) + pkt)["type"] == "sledInformation"
     bad = bytearray(pkt)
     bad[12] ^= 0xFF
@@ -233,7 +233,7 @@ def test_fetch_file_timeout_path():
     streamer = FlirUsbStreamer(mock_mode=False)
     streamer.transport = _FakeTransport(link)
     streamer.device_connected = True
-    # No openFileStatus is ever queued → timeout.
+    # No openFileStatus is ever queued -> timeout.
     with pytest.raises(FileIOFetchError, match="timed out waiting for openFileStatus"):
         streamer.fetch_file("missing.rsc", timeout_s=0.3)
     assert ("open", "missing.rsc", "r") in link.sent

@@ -36,6 +36,31 @@ IAP2_COMMAND_SESSION = 2
 EA_COMMAND_SESSION_ID = 1
 EA_SESSION_PREFIX_SIZE = 2
 
+# batteryChargingStateUpdate wire strings -> GUI labels (match case-insensitively).
+CHARGING_STATE_LABELS = {
+    "statedeveloper": "Developer",
+    "statenocharging": "Not Charging",
+    "statemanagedbatterycharging": "Managed Charging",
+    "statemanagedbatterychargingonly": "Managed Charging Only",
+    "statechargingsmartphone": "Charging Phone",
+    "statechargingsmartphoneonly": "Charging Phone Only",
+    "statehandlefault": "Handle Fault",
+    "statehandlefaultheat": "Handle Fault (Heat)",
+    "statehandlefaultbadcharger": "Handle Fault (Bad Charger)",
+    "statechargingsmartphonefaultheat": "Phone Charge Fault (Heat)",
+    "invalid": "Invalid",
+}
+
+
+def format_charging_state(raw: Optional[str]) -> str:
+    """Map a wire chargingState string to a short GUI label; unknown values pass through."""
+    if raw is None:
+        return "Unknown"
+    text = str(raw).strip()
+    if not text:
+        return "Unknown"
+    return CHARGING_STATE_LABELS.get(text.lower(), text)
+
 
 def pack_ea_payload(ea_session_id: int, body: bytes) -> bytes:
     """Build an EA session payload: BE session id + body bytes."""
