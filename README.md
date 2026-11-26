@@ -13,7 +13,7 @@ RoseDud is a pure-USB Python client and PyQt6 viewer for the original **FLIR One
 | Hardware | FLIR One **Gen 1** only (VID `09CB`, PID `1996`). The Gen 2 / Gen 3 / Pro models use a different protocol and will not work. |
 | Windows | Tested (native WinUSB backend) |
 | Linux / macOS | libusb backend included but **largely untested**; reports welcome |
-| Temperatures | Approximate: an empirical calibration model, not validated against a blackbody (see [docs §8](docs/DEVICE_AND_SYSTEM_ARCHITECTURE.md#8-radiometric-temperature-conversion--optical-fusion)) |
+| Temperatures | Approximate: uses the Lepton's own radiometric calibration (RBFO) from its telemetry, checked against only two reference points and not a blackbody (see [docs §8](docs/DEVICE_AND_SYSTEM_ARCHITECTURE.md#8-radiometric-temperature-conversion--optical-fusion)) |
 
 <p align="center">
   <img src="docs/images/screenshot-thermal.jpg" width="600" alt="RoseDud showing the warm afterimage of a hand pressed against a wall, in the Ironbow palette with spot, min, max and center readouts">
@@ -133,18 +133,19 @@ python flir_app.py              # connect to the camera (falls back to mock mode
 python flir_app.py --mock       # synthetic stream, no hardware needed
 python flir_app.py --debug      # verbose USB / iAP2 logging
 python flir_app.py --calib path/to/calib.rsc --snapshot-dir path/to/output
+python flir_app.py --radiometry shutter-offset   # force the older shutter-offset model
 ```
 
 `--calib` defaults to the `calib.rsc` next to `flir_app.py`. Snapshots default to `snapshots/` next to it.
 
-`calib.rsc` is not included in this repository: it is FLIR's factory file and is specific to each unit. You can copy your own from the device's JFFS2 calibration partition (see [docs §3](docs/DEVICE_AND_SYSTEM_ARCHITECTURE.md#3-128-mb-nand-flash-breakdown--memory-architecture) and [§8.2](docs/DEVICE_AND_SYSTEM_ARCHITECTURE.md#82-planck-constants-calibrsc)). Without it, the app falls back to built-in defaults.
+`calib.rsc` is not included in this repository: it is FLIR's factory file and is specific to each unit. You can copy your own from the device's JFFS2 calibration partition (see [docs §3](docs/DEVICE_AND_SYSTEM_ARCHITECTURE.md#3-128-mb-nand-flash-breakdown--memory-architecture) and [§8.3](docs/DEVICE_AND_SYSTEM_ARCHITECTURE.md#83-calibrsc-constants)). Temperatures do not need it: they use the RBFO values the camera reports in its telemetry. It supplies the MSX fusion values and the Planck constants for the shutter-offset fallback; without it, built-in defaults are used.
 
 ### Features
 * **View modes:** Thermal, Visual, Dual side-by-side, MSX-style edge fusion (a Laplacian edge overlay), and Alpha blend.
 * **Palettes:** Ironbow, Inferno, Turbo, Jet, Hot, White-Hot, Black-Hot, Ocean.
 * **Spot metering:** hover readout plus automatic min, max and center markers. Readings are in °F by default; tick *Celsius Units* to switch.
-* **Shutter calibration:** when prompted, slide the shutter closed and hold it until the banner turns green, then release it. The app re-estimates its offset from the shutter temperature (see [docs §8.4](docs/DEVICE_AND_SYSTEM_ARCHITECTURE.md#84-shutter-based-offset-calibration-ffc)).
-* **Tuning:** an XY pad for visual/thermal parallax alignment, alpha weight, and manual offset and gain sliders.
+* **Shutter calibration:** when prompted, slide the shutter closed and hold it until the banner turns green, then release it. The Lepton recalibrates itself against the shutter. Until it has done so once after power-up, readings are marked *uncal* (see [docs §8.4](docs/DEVICE_AND_SYSTEM_ARCHITECTURE.md#84-shutter-based-offset-calibration-ffc)).
+* **Tuning:** an XY pad for visual/thermal parallax alignment, alpha weight, and emissivity and reflected-temperature sliders.
 * **Telemetry:** battery voltage, charge and charging state; shutter state and temperature; board, Lepton and firmware versions.
 * **Snapshots:** each one saves a thermal °C matrix (`.csv`), a colorized thermal image (`.png`) and the visual frame (`.jpg`).
 

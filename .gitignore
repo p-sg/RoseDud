@@ -16,3 +16,4 @@ Thumbs.db
 
 # Factory calibration extracted from the sled (FLIR's file; unit-specific)
 calib.rsc
+*.fff

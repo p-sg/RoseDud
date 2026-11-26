@@ -413,6 +413,10 @@ class RosebudFrame:
     fpa_temp_k: float = 0.0
     housing_temp_k: float = 0.0
     ffc_state: str = "unknown"
+    # False until the active conversion is calibrated (first FFC / shutter estimate).
+    temps_calibrated: bool = True
+    # True when thermal_celsius was geometrically remapped by the LCF map.
+    lcf_applied: bool = False
     min_temp_c: float = 0.0
     max_temp_c: float = 0.0
     center_temp_c: float = 0.0
@@ -516,8 +520,23 @@ class RosebudParser:
         # Unpack VoSPI thermal packets
         thermal_matrix, telemetry = self._unpack_vospi_thermal(thermal_raw_bytes)
         
-        # Radiometric conversion to Celsius using calibration
+        # Radiometric conversion. RBFO comes from Row B every frame; until it has been
+        # seen (or if the shutter-offset mode is forced) the fallback curve is used.
+        row_b = telemetry.get("row_b") or {}
+        self.calib.set_rbfo(row_b.get("rbfo"))
+        if self.calib.using_rbfo:
+            # Before the Lepton's first FFC since power-up the raw counts are not yet on
+            # the RBFO curve (about 20 K off live); Row B word 2 still holds its placeholder.
+            temps_calibrated = not row_b.get("shutter_temp_at_last_ffc_is_placeholder", False)
+        else:
+            temps_calibrated = self.calib.shutter_offset_calibrated
         thermal_celsius = self.calib.raw_to_celsius(thermal_matrix)
+
+        # Optional (experimental) lens correction: geometry of the temperature image
+        # only, so thermal_raw stays the sensor's own counts.
+        lcf_applied = self.calib.lcf_active
+        if lcf_applied:
+            thermal_celsius = self.calib.apply_lcf(thermal_celsius)
         
         # Decode Visual JPEG
         visual_img = None
@@ -558,6 +577,8 @@ class RosebudParser:
             shutter_temp_k=float(metadata.get("shutterTemperature", 0.0)),
             fpa_temp_k=fpa_temp_k,
             housing_temp_k=housing_temp_k,
+            temps_calibrated=temps_calibrated,
+            lcf_applied=lcf_applied,
             # Keep the ffc daemon JSON state (FFC_RAD_VALID, …) for shutter calibration.
             ffc_state=metadata.get("ffcState", "unknown"),
             timestamp_notified=float(metadata.get("usbNotifiedTimestamp", 0.0)),
