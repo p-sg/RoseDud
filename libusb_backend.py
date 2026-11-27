@@ -2,6 +2,7 @@
 PyUSB / libusb backend for FLIR ONE (Linux fallback and Windows alternative).
 """
 
+import logging
 import time
 from typing import Optional
 
@@ -12,6 +13,8 @@ from iap2 import (
     EP_IAP2_OUT,
     IAP2LinkManager,
 )
+
+logger = logging.getLogger("rosedud.libusb")
 
 FLIR_VID = 0x09CB
 FLIR_PID = 0x1996
@@ -27,10 +30,16 @@ def get_usb_backend():
 
 class LibUsbTransport:
     def __init__(self, log_fn=None, full_startup: bool = True):
-        self.log_fn = log_fn or print
+        self.log_fn = log_fn
         self.full_startup = full_startup
         self.dev = None
         self.link_mgr: Optional[IAP2LinkManager] = None
+
+    def _log(self, level: int, msg: str) -> None:
+        if self.log_fn is not None:
+            self.log_fn(msg)
+        else:
+            logger.log(level, msg)
 
     def is_available(self) -> bool:
         try:
@@ -65,7 +74,8 @@ class LibUsbTransport:
         if self.dev is None:
             return False
 
-        self.log_fn(
+        self._log(
+            logging.DEBUG,
             f"[libusb] Found FLIR One (bus={self.dev.bus}, addr={self.dev.address})"
         )
 
@@ -73,7 +83,7 @@ class LibUsbTransport:
             try:
                 usb.util.claim_interface(self.dev, intf)
             except Exception as e:
-                self.log_fn(f"[libusb] claim_interface({intf}): {e}")
+                self._log(logging.WARNING, f"[libusb] claim_interface({intf}): {e}")
 
         for ep in (EP_IAP2_IN, EP_IAP2_OUT, EP_FILEIO_IN, EP_FRAME_IN):
             try:
@@ -99,7 +109,7 @@ class LibUsbTransport:
         self.link_mgr.start()
 
         if not self.link_mgr.link_ready.wait(timeout=10.0):
-            self.log_fn("[libusb] iAP2 link handshake timed out")
+            self._log(logging.WARNING, "[libusb] iAP2 link handshake timed out")
             return False
 
         # Cycle alt 0->1 so a re-connect still gets sledInformation when the prior
@@ -107,9 +117,9 @@ class LibUsbTransport:
         for index, alt in ((2, 0), (1, 0), (1, 1), (2, 1)):
             try:
                 self.dev.set_interface_altsetting(interface=index, alternate_setting=alt)
-                self.log_fn(f"[libusb] SET_INTERFACE({index},{alt}) OK")
+                self._log(logging.DEBUG, f"[libusb] SET_INTERFACE({index},{alt}) OK")
             except Exception as e:
-                self.log_fn(f"[libusb] SET_INTERFACE({index},{alt}): {e}")
+                self._log(logging.WARNING, f"[libusb] SET_INTERFACE({index},{alt}): {e}")
             time.sleep(0.15)
 
         deadline = time.monotonic() + 5.0
@@ -118,22 +128,22 @@ class LibUsbTransport:
                 break
             time.sleep(0.05)
         if self.link_mgr.sled_info is None:
-            self.log_fn("[libusb] No sledInformation; re-cycling FileIO interface")
+            self._log(logging.WARNING, "[libusb] No sledInformation; re-cycling FileIO interface")
             for alt in (0, 1):
                 try:
                     self.dev.set_interface_altsetting(interface=1, alternate_setting=alt)
-                    self.log_fn(f"[libusb] SET_INTERFACE(1,{alt}) OK")
+                    self._log(logging.DEBUG, f"[libusb] SET_INTERFACE(1,{alt}) OK")
                 except Exception as e:
-                    self.log_fn(f"[libusb] SET_INTERFACE(1,{alt}): {e}")
+                    self._log(logging.WARNING, f"[libusb] SET_INTERFACE(1,{alt}): {e}")
                 time.sleep(0.3)
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline and self.link_mgr.sled_info is None:
                 time.sleep(0.05)
         if self.link_mgr.sled_info is not None:
             mode = self.link_mgr.sled_info.get("operatingMode")
-            self.log_fn(f"[libusb] sledInformation OK (mode={mode})")
+            self._log(logging.INFO, f"[libusb] sledInformation OK (mode={mode})")
         else:
-            self.log_fn("[libusb] WARNING: still no sledInformation — FileIO may fail")
+            self._log(logging.WARNING, "[libusb] WARNING: still no sledInformation — FileIO may fail")
 
         return True
 
@@ -169,7 +179,7 @@ class LibUsbTransport:
                 for index in (2, 1):
                     try:
                         self.dev.set_interface_altsetting(interface=index, alternate_setting=0)
-                        self.log_fn(f"[libusb] SET_INTERFACE({index},0) OK")
+                        self._log(logging.DEBUG, f"[libusb] SET_INTERFACE({index},0) OK")
                     except Exception:
                         pass
                 import usb.util

@@ -4,6 +4,7 @@ Pure-USB (no UART required) implementation.
 Uses native WinUSB on Windows; PyUSB/libusb fallback elsewhere.
 """
 
+import logging
 import queue
 import sys
 import threading
@@ -22,6 +23,8 @@ from iap2 import (
     FileIOPacketParser,
     parse_open_file_status,
 )
+
+logger = logging.getLogger("rosedud.usb")
 
 
 class UsbTransport(Protocol):
@@ -104,7 +107,6 @@ class FlirUsbStreamer:
             return True
 
         self.transport = _create_transport(
-            log_fn=lambda msg: print(f"[USB] {msg}"),
             full_startup=self.full_startup,
             debug=self.debug
         )
@@ -115,7 +117,7 @@ class FlirUsbStreamer:
             )
             return False
 
-        print("[USB] Connecting to FLIR One Camera (0x09CB:0x1996)...")
+        logger.info("[USB] Connecting to FLIR One Camera (0x09CB:0x1996)...")
         if not self.transport.connect(timeout_sec=timeout_sec):
             self.error_message = (
                 "Failed to connect to FLIR One. Ensure the camera is powered on, "
@@ -251,7 +253,7 @@ class FlirUsbStreamer:
             if not opened["ok"]:
                 continue
             sid = opened["stream_identifier"]
-            print(f"[USB] Reclaiming late openFileStatus stream={sid}")
+            logger.debug(f"[USB] Reclaiming late openFileStatus stream={sid}")
             try:
                 link.send_close_file(sid)
                 link.wait_for_control("fileClosed", timeout_s=1.0)
@@ -306,17 +308,17 @@ class FlirUsbStreamer:
             # Prefer waiting for sledInformation (signals FileIO is ready). If a prior
             # session left the channel up, openFile can still succeed without it.
             if link.sled_info is None:
-                print("[USB] Waiting for sledInformation...")
+                logger.debug("[USB] Waiting for sledInformation...")
                 info = link.wait_for_sled_information(
                     timeout_s=min(8.0, max(1.0, remaining()))
                 )
                 if info is None:
-                    print(
+                    logger.warning(
                         "[USB] No sledInformation yet — trying openFile anyway "
                         "(FileIO may still be ready from a prior session)"
                     )
                 else:
-                    print(f"[USB] sledInformation OK (mode={info.get('operatingMode')})")
+                    logger.debug(f"[USB] sledInformation OK (mode={info.get('operatingMode')})")
                     time.sleep(0.3)
 
             # Short per-attempt open wait: missing files used to burn the full timeout,
@@ -335,7 +337,7 @@ class FlirUsbStreamer:
                 if open_msg is not None:
                     break
                 if attempt + 1 < open_attempts:
-                    print(f"[USB] openFileStatus timeout for {name!r}; retrying open...")
+                    logger.warning(f"[USB] openFileStatus timeout for {name!r}; retrying open...")
 
             if open_msg is None:
                 self._reclaim_late_opens(link, min(1.5, remaining()))
@@ -389,7 +391,7 @@ class FlirUsbStreamer:
                 continue
 
             try:
-                print(f"[USB] Watchdog: no frames for {self.no_frame_timeout_sec:.1f}s; reconnecting...")
+                logger.warning(f"[USB] Watchdog: no frames for {self.no_frame_timeout_sec:.1f}s; reconnecting...")
 
                 # Stop threads/transports cleanly.
                 self.stop()
@@ -402,9 +404,9 @@ class FlirUsbStreamer:
                 if self.connect(timeout_sec=15.0):
                     self.start()
                     if self.debug:
-                        print(f"[USB] Watchdog reconnected; {threading.active_count()} threads alive")
+                        logger.debug(f"[USB] Watchdog reconnected; {threading.active_count()} threads alive")
                 else:
-                    print("[USB] Watchdog reconnect failed.")
+                    logger.error("[USB] Watchdog reconnect failed.")
 
             finally:
                 try:
