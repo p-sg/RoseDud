@@ -4,6 +4,7 @@ Shared by WinUSB and libusb transport backends.
 """
 
 import json
+import logging
 import queue
 import struct
 import threading
@@ -11,6 +12,8 @@ import time
 import zlib
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
+
+logger = logging.getLogger("rosedud.iap2")
 
 LINK_DETECT = bytes([0xFF, 0x55, 0x02, 0x00, 0xEE, 0x10])
 
@@ -120,6 +123,22 @@ def parse_config_packet(data: bytes) -> Optional[Tuple[int, bytes]]:
         return None
     payload = data[CONFIG_HEADER_SIZE : CONFIG_HEADER_SIZE + payload_length]
     return protocol_version, payload.rstrip(b"\x00")
+
+
+def parse_config_header(data: bytes) -> Optional[Tuple[int, int]]:
+    """
+    Check a 16-byte 0x1CC header on its own (magic + CRC). Returns
+    (protocol_version, json_length) or None. The sled often sends the header
+    as a separate packet with the JSON in the next one.
+    """
+    if len(data) < CONFIG_HEADER_SIZE:
+        return None
+    magic, protocol_version, payload_length, header_crc = struct.unpack(
+        "<IIII", data[:CONFIG_HEADER_SIZE]
+    )
+    if magic != CONFIG_MAGIC or fileio_crc32(data[:12]) != header_crc:
+        return None
+    return protocol_version, payload_length
 
 
 def extract_control_json(payload: bytes) -> Optional[dict]:
@@ -529,7 +548,7 @@ class IAP2LinkManager(threading.Thread):
         super().__init__(daemon=True)
         self.write_fn = write_fn
         self.read_fn = read_fn
-        self.log_fn = log_fn or (lambda _msg: None)
+        self.log_fn = log_fn
         self.full_startup = full_startup
         
         self.running = True
@@ -633,7 +652,8 @@ class IAP2LinkManager(threading.Thread):
                     payload=stop_cmd_msg,
                 )
                 self.write_fn(pkt)
-                self.log_fn(
+                self._log(
+                    logging.DEBUG,
                     f"[iAP2 SENT] 0xEA01 Stop command session "
                     f"(seq={self.host_seq}, sess={EA_COMMAND_SESSION_ID})"
                 )
@@ -650,7 +670,7 @@ class IAP2LinkManager(threading.Thread):
                     session=1, payload=build_start_fileio_session_message()
                 )
                 self.write_fn(pkt)
-                self.log_fn(f"[iAP2 SENT] 0xEA00 Protocol 1 (seq={self.host_seq})")
+                self._log(logging.DEBUG, f"[iAP2 SENT] 0xEA00 Protocol 1 (seq={self.host_seq})")
                 self.host_seq += 1
                 time.sleep(0.2)
                 continue
@@ -662,7 +682,7 @@ class IAP2LinkManager(threading.Thread):
                     session=1, payload=build_start_frame_session_message()
                 )
                 self.write_fn(pkt)
-                self.log_fn(f"[iAP2 SENT] 0xEA00 Protocol 2 (seq={self.host_seq})")
+                self._log(logging.DEBUG, f"[iAP2 SENT] 0xEA00 Protocol 2 (seq={self.host_seq})")
                 self.host_seq += 1
                 time.sleep(0.2)
                 continue
@@ -681,7 +701,8 @@ class IAP2LinkManager(threading.Thread):
                     payload=outbound,
                 )
                 self.write_fn(pkt)
-                self.log_fn(
+                self._log(
+                    logging.DEBUG,
                     f"[iAP2 SENT] control (seq={sent_seq}, sess={self.command_session}, "
                     f"{len(outbound)} B, head={outbound[:16].hex()})"
                 )
@@ -719,13 +740,14 @@ class IAP2LinkManager(threading.Thread):
                     if ((ack_num - sent_seq) & 0xFF) < 0x7F:
                         if not got_ack:
                             got_ack = True
-                            self.log_fn(
+                            self._log(
+                                logging.DEBUG,
                                 f"[iAP2] camera ACK={ack_num} (covered sent seq={sent_seq})"
                             )
                     if piggy or _c == 0x80:
                         self._pending_packets.put(parsed_ack)
                 if not got_ack:
-                    self.log_fn(f"[iAP2] no ACK for seq={sent_seq} within 0.5s")
+                    self._log(logging.DEBUG, f"[iAP2] no ACK for seq={sent_seq} within 0.5s")
                 continue
 
             try:
@@ -767,7 +789,7 @@ class IAP2LinkManager(threading.Thread):
                     ctrl=0xC0, seq=0, ack=self.camera_seq, session=0, payload=payload
                 )
                 self.write_fn(syn_ack)
-                self.log_fn(f"[iAP2] SYN-ACK (seq=0, ack={self.camera_seq})")
+                self._log(logging.DEBUG, f"[iAP2] SYN-ACK (seq=0, ack={self.camera_seq})")
                 self.host_seq = 1
                 if not ident_sent:
                     time.sleep(0.02)
@@ -780,7 +802,7 @@ class IAP2LinkManager(threading.Thread):
                     )
                     self.write_fn(ident_pkt)
                     ident_sent = True
-                    self.log_fn("[iAP2 SENT] 0x1D02 Identification (seq=1)")
+                    self._log(logging.DEBUG, "[iAP2 SENT] 0x1D02 Identification (seq=1)")
                     self.host_seq = 2
                 continue
 
@@ -799,7 +821,7 @@ class IAP2LinkManager(threading.Thread):
                 )
                 self.write_fn(ident_pkt)
                 ident_sent = True
-                self.log_fn(f"[iAP2 SENT] 0x1D02 Identification (seq={self.host_seq})")
+                self._log(logging.DEBUG, f"[iAP2 SENT] 0x1D02 Identification (seq={self.host_seq})")
                 self.host_seq = 2
                 continue
 
@@ -808,7 +830,7 @@ class IAP2LinkManager(threading.Thread):
                     ctrl=0x40, seq=self.host_seq, ack=self.camera_seq, session=session
                 )
                 self.write_fn(data_ack)
-                self.log_fn(f"[iAP2 RECV] 0xAE00 -> ACK (seq={self.host_seq})")
+                self._log(logging.DEBUG, f"[iAP2 RECV] 0xAE00 -> ACK (seq={self.host_seq})")
                 continue
 
             if msg_id == 0xAE03 and not command_sent:
@@ -824,7 +846,7 @@ class IAP2LinkManager(threading.Thread):
                 )
                 self.write_fn(cmd_pkt)
                 command_sent = True
-                self.log_fn(f"[iAP2 SENT] 0xEA00 Protocol 0 (seq={self.host_seq})")
+                self._log(logging.DEBUG, f"[iAP2 SENT] 0xEA00 Protocol 0 (seq={self.host_seq})")
                 self.host_seq = (self.host_seq + 1) & 0xFF
                 time.sleep(0.2)
                 self.link_ready.set()
@@ -841,7 +863,8 @@ class IAP2LinkManager(threading.Thread):
                     # session up). Stop then restart so FileIO SET_INTERFACE can emit
                     # sledInformation again.
                     if not command_sent and ident_sent:
-                        self.log_fn(
+                        self._log(
+                            logging.DEBUG,
                             "[iAP2] EA data before EA00 — stopping stale session then EA00"
                         )
                         stop_pkt = make_iap2_packet(
@@ -852,7 +875,8 @@ class IAP2LinkManager(threading.Thread):
                             payload=stop_cmd_msg,
                         )
                         self.write_fn(stop_pkt)
-                        self.log_fn(
+                        self._log(
+                            logging.DEBUG,
                             f"[iAP2 SENT] 0xEA01 Stop command session "
                             f"(seq={self.host_seq}, forced)"
                         )
@@ -867,7 +891,8 @@ class IAP2LinkManager(threading.Thread):
                         )
                         self.write_fn(cmd_pkt)
                         command_sent = True
-                        self.log_fn(
+                        self._log(
+                            logging.DEBUG,
                             f"[iAP2 SENT] 0xEA00 Protocol 0 (seq={self.host_seq}, forced)"
                         )
                         self.host_seq = (self.host_seq + 1) & 0xFF
@@ -876,27 +901,38 @@ class IAP2LinkManager(threading.Thread):
 
                 data_obj = extract_control_json(payload)
                 if data_obj is None and session == self.command_session:
-                    self.log_fn(
-                        f"[iAP2 RAW] sess={session} len={len(payload)} "
-                        f"json=none head={payload[:16].hex()}"
-                    )
+                    body = strip_ea_prefix(payload)
+                    hdr = parse_config_header(body)
+                    if hdr is not None and len(body) - CONFIG_HEADER_SIZE < hdr[1]:
+                        self._log(
+                            logging.DEBUG,
+                            f"[iAP2] control header (v{hdr[0]}), {hdr[1]}-byte JSON follows",
+                        )
+                    else:
+                        self._log(
+                            logging.DEBUG,
+                            f"[iAP2 RAW] sess={session} len={len(payload)} "
+                            f"json=none head={payload[:16].hex()}"
+                        )
                 if data_obj is not None:
                     msg_type = data_obj.get("type")
                     data_payload = data_obj.get("data", {})
                     cfg = parse_config_packet(strip_ea_prefix(payload))
                     head = payload[:16].hex()
                     if cfg is not None:
-                        self.log_fn(
+                        self._log(
+                            logging.DEBUG,
                             f"[iAP2 RAW] sess={session} len={len(payload)} "
                             f"type={msg_type} cfg_ver={cfg[0]} head={head}"
                         )
                     else:
-                        self.log_fn(
+                        self._log(
+                            logging.DEBUG,
                             f"[iAP2 RAW] sess={session} len={len(payload)} "
                             f"type={msg_type} cfg=none head={head}"
                         )
                     if msg_type != "batteryVoltageUpdate":
-                        self.log_fn(f"[iAP2 DATA] {json.dumps(data_obj, separators=(',', ':'))}")
+                        self._log(logging.DEBUG, f"[iAP2 DATA] {json.dumps(data_obj, separators=(',', ':'))}")
 
                     if msg_type == "batteryVoltageUpdate":
                         self.battery_voltage = data_payload.get("voltage", self.battery_voltage)
@@ -914,7 +950,13 @@ class IAP2LinkManager(threading.Thread):
                     elif msg_type in ("openFileStatus", "fileClosed"):
                         self.control_messages.put(data_obj)
                 elif msg_id:
-                    self.log_fn(f"[iAP2 RECV] 0x{msg_id:04X} -> ACK (Payload: {payload.hex()})")
+                    self._log(logging.DEBUG, f"[iAP2 RECV] 0x{msg_id:04X} -> ACK (Payload: {payload.hex()})")
+
+    def _log(self, level: int, msg: str) -> None:
+        if self.log_fn is not None:
+            self.log_fn(msg)
+        else:
+            logger.log(level, msg)
 
     def start_fileio_session(self) -> None:
         self.trigger_fileio.set()

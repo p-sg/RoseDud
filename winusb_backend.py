@@ -4,6 +4,7 @@ Uses overlapped I/O (required for WinUsb_Initialize on Zadig-bound interfaces).
 """
 
 import ctypes
+import logging
 import sys
 import time
 from ctypes import wintypes
@@ -16,6 +17,8 @@ from iap2 import (
     EP_IAP2_OUT,
     IAP2LinkManager,
 )
+
+logger = logging.getLogger("rosedud.winusb")
 
 FLIR_VID = 0x09CB
 FLIR_PID = 0x1996
@@ -277,13 +280,13 @@ class WinUsbInterface:
                     if self._timeout_log_remaining > 0:
                         self._timeout_log_remaining -= 1
                         if self.debug:
-                            print(f"[WinUSB] {pipe_fn_name} pipe=0x{pipe_id:02X} wait-timeout")
+                            logger.debug(f"[WinUSB] {pipe_fn_name} pipe=0x{pipe_id:02X} wait-timeout")
                     return -1, b""
             else:
                 if self._fail_log_remaining > 0:
                     self._fail_log_remaining -= 1
                     if self.debug:
-                        print(f"[WinUSB] {pipe_fn_name} pipe=0x{pipe_id:02X} transfer-failed err={err}")
+                        logger.debug(f"[WinUSB] {pipe_fn_name} pipe=0x{pipe_id:02X} transfer-failed err={err}")
                 return -1, b""
 
         n = transferred.value
@@ -323,13 +326,19 @@ class WinUsbTransport:
     """Manages all three WinUSB interface handles and iAP2 link thread."""
 
     def __init__(self, log_fn: Optional[Callable] = None, full_startup: bool = False, debug: bool = False):
-        self.log_fn = log_fn or print
+        self.log_fn = log_fn
         self.full_startup = full_startup
         self.debug = debug
         self.intf0 = WinUsbInterface(GUID_INTF0, "iAP2", debug=self.debug)
         self.intf1 = WinUsbInterface(GUID_INTF1, "FileIO", debug=self.debug)
         self.intf2 = WinUsbInterface(GUID_INTF2, "Frame", debug=self.debug)
         self.link_mgr: Optional[IAP2LinkManager] = None
+
+    def _log(self, level: int, msg: str) -> None:
+        if self.log_fn is not None:
+            self.log_fn(msg)
+        else:
+            logger.log(level, msg)
 
     def is_available(self) -> bool:
         return sys.platform == "win32"
@@ -347,7 +356,7 @@ class WinUsbTransport:
     def _set_interface(self, index: int, alt: int, delay_sec: float = 0.2) -> bool:
         """USB SET_INTERFACE (bmRequestType=0x01, bRequest=0x0B)."""
         ok = self.intf0.control_transfer(0x01, 0x0B, alt, index)
-        self.log_fn(f"[WinUSB] SET_INTERFACE({index},{alt})={ok}")
+        self._log(logging.DEBUG, f"[WinUSB] SET_INTERFACE({index},{alt})={ok}")
         if ok and delay_sec > 0:
             time.sleep(delay_sec)
         return ok
@@ -369,7 +378,7 @@ class WinUsbTransport:
         t0 = time.time()
         while time.time() - t0 < timeout_sec:
             if self.intf0.open():
-                self.log_fn(f"[WinUSB] Interface 0 open: {self.intf0.path}")
+                self._log(logging.DEBUG, f"[WinUSB] Interface 0 open: {self.intf0.path}")
                 break
             time.sleep(0.1)
         else:
@@ -393,7 +402,7 @@ class WinUsbTransport:
         self.link_mgr.start()
 
         if not self.link_mgr.link_ready.wait(timeout=20.0):
-            self.log_fn("[WinUSB] iAP2 link handshake timed out")
+            self._log(logging.WARNING, "[WinUSB] iAP2 link handshake timed out")
             return False
 
         # Cycle bulk interfaces through alt 0 then 1 so a re-connect still gets
@@ -402,31 +411,32 @@ class WinUsbTransport:
         self._set_interface(1, 0, delay_sec=0.2)
 
         if not self._activate_interface(1, delay_sec=0.5):
-            self.log_fn("[WinUSB] Failed to activate Interface 1 (FileIO)")
+            self._log(logging.ERROR, "[WinUSB] Failed to activate Interface 1 (FileIO)")
             return False
 
         if not self.intf1.open():
-            self.log_fn("[WinUSB] Failed to open Interface 1 (FileIO)")
+            self._log(logging.ERROR, "[WinUSB] Failed to open Interface 1 (FileIO)")
             return False
         # Ensure WinUSB handle is bound to Active AltSetting 1.
         self.intf1.set_alt_setting(1)
         self.intf1.reset_pipe(EP_FILEIO_IN)
-        self.log_fn(f"[WinUSB] Interface 1 active: {self.intf1.path}")
+        self._log(logging.DEBUG, f"[WinUSB] Interface 1 active: {self.intf1.path}")
 
         if not self._activate_interface(2, delay_sec=0.2):
-            self.log_fn("[WinUSB] Failed to activate Interface 2 (Frame)")
+            self._log(logging.ERROR, "[WinUSB] Failed to activate Interface 2 (Frame)")
             return False
 
         if not self.intf2.open():
-            self.log_fn("[WinUSB] Failed to open Interface 2 (Frame)")
+            self._log(logging.ERROR, "[WinUSB] Failed to open Interface 2 (Frame)")
             return False
         # Ensure WinUSB handle is bound to Active AltSetting 1.
         self.intf2.set_alt_setting(1)
         self.intf2.reset_pipe(EP_FRAME_IN)
-        self.log_fn(f"[WinUSB] Interface 2 active: {self.intf2.path}")
+        self._log(logging.DEBUG, f"[WinUSB] Interface 2 active: {self.intf2.path}")
 
         if not self._wait_for_sled_information(5.0):
-            self.log_fn(
+            self._log(
+                logging.WARNING,
                 "[WinUSB] No sledInformation after UP; re-cycling FileIO interface"
             )
             self._set_interface(1, 0, delay_sec=0.3)
@@ -435,12 +445,13 @@ class WinUsbTransport:
                 self.intf1.set_alt_setting(1)
                 self.intf1.reset_pipe(EP_FILEIO_IN)
             if not self._wait_for_sled_information(5.0):
-                self.log_fn(
+                self._log(
+                    logging.WARNING,
                     "[WinUSB] WARNING: still no sledInformation — FileIO may fail"
                 )
         else:
             mode = self.link_mgr.sled_info.get("operatingMode")
-            self.log_fn(f"[WinUSB] sledInformation OK (mode={mode})")
+            self._log(logging.INFO, f"[WinUSB] sledInformation OK (mode={mode})")
 
         return True
 

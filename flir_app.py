@@ -2,10 +2,11 @@
 RoseDud: PyQt6 thermal & visual viewer for the FLIR One (Gen 1) sled.
 
 Usage:
-    python flir_app.py [--mock] [--debug] [--calib PATH] [--snapshot-dir PATH]
+    python flir_app.py [--mock] [-v | --verbose | --debug] [--calib PATH] [--snapshot-dir PATH]
 """
 
 import argparse
+import logging
 import os
 import sys
 import time
@@ -29,6 +30,8 @@ from flir_usb import FlirUsbStreamer
 from iap2 import format_charging_state
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+logger = logging.getLogger("rosedud.app")
 
 # Color palettes
 COLORMAPS = [
@@ -813,7 +816,7 @@ class FlirViewerApp(QMainWindow):
                 s = format_charging_state(raw_s)
                 
                 if hasattr(self.streamer, 'debug') and self.streamer.debug:
-                    print(f"[UI] Read battery from link_mgr: {v:.2f}V {p}% - {s} at {c}mA")
+                    logger.debug(f"[UI] Read battery from link_mgr: {v:.2f}V {p}% - {s} at {c}mA")
                 
                 if v > 0 or p > 0 or s != "Unknown":
                     charging_like = "charging" in s.lower() and "fault" not in s.lower()
@@ -887,14 +890,14 @@ class FlirViewerApp(QMainWindow):
             vis_path = os.path.join(self.snapshot_dir, f"visual_{ts}.jpg")
             cv2.imwrite(vis_path, vis)
             
-        print(f"\n[Snapshot Saved]: {csv_path}, {thm_path}")
+        logger.info(f"[Snapshot Saved]: {csv_path}, {thm_path}")
 
     def closeEvent(self, event):
         self.streamer.stop()
         super().closeEvent(event)
 
 
-def main():
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RoseDud: FLIR One (Gen 1) thermal & visual viewer")
     parser.add_argument("--mock", action="store_true", help="Run with synthetic thermal stream (for offline testing)")
     parser.add_argument("--calib", type=str, default=os.path.join(APP_DIR, "calib.rsc"),
@@ -907,27 +910,47 @@ def main():
                              "(default); shutter-offset: always use the shutter-offset model")
     parser.add_argument("--snapshot-dir", type=str, default=os.path.join(APP_DIR, "snapshots"),
                         help="Where snapshots are saved (default: snapshots/ next to this script)")
-    parser.add_argument("--debug", action="store_true", help="Enable verbose debug logging")
-    args = parser.parse_args()
+    parser.add_argument("-v", "--verbose", "--debug", dest="verbose", action="store_true",
+                        help="Verbose logging: every iAP2 packet, USB interface details "
+                             "(--debug is the same)")
+    return parser.parse_args(argv)
+
+
+def configure_logging(verbose: bool = False) -> int:
+    """Set up console logging for the app. Returns the level used (INFO, or DEBUG if verbose)."""
+    level = logging.DEBUG if verbose else logging.INFO
+    root = logging.getLogger("rosedud")
+    root.setLevel(level)
+    if not any(getattr(h, "_rosedud_console", False) for h in root.handlers):
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        handler._rosedud_console = True
+        root.addHandler(handler)
+    return level
+
+
+def main():
+    args = parse_args()
+    configure_logging(args.verbose)
     
     if not os.path.exists(args.calib):
-        print(f"[Notice]: calibration file not found at {args.calib}; using built-in defaults.")
+        logger.info(f"[Notice]: calibration file not found at {args.calib}; using built-in defaults.")
     lcf_path = args.lcf if args.lcf and os.path.exists(args.lcf) else None
     if args.lcf and lcf_path is None:
-        print(f"[Notice]: LCF map not found at {args.lcf}; continuing without it.")
+        logger.info(f"[Notice]: LCF map not found at {args.lcf}; continuing without it.")
     calib = FlirCalibration(
         args.calib if os.path.exists(args.calib) else None,
         lcf_path=lcf_path,
         mode="shutter_offset" if args.radiometry == "shutter-offset" else "auto",
     )
     if lcf_path:
-        print(f"[Notice]: loaded LCF map from {lcf_path} (experimental)")
-    streamer = FlirUsbStreamer(calib=calib, mock_mode=args.mock, full_startup=True, debug=args.debug)
+        logger.info(f"[Notice]: loaded LCF map from {lcf_path} (experimental)")
+    streamer = FlirUsbStreamer(calib=calib, mock_mode=args.mock, full_startup=True, debug=args.verbose)
     
     if not args.mock:
         if not streamer.connect():
-            print(f"\n[Notice]: {streamer.error_message}")
-            print("Launching in synthetic MOCK mode for preview...\n")
+            logger.info(f"[Notice]: {streamer.error_message}")
+            logger.info("Launching in synthetic MOCK mode for preview...")
             streamer.mock_mode = True
             streamer.connect()
             

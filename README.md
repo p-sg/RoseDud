@@ -131,10 +131,12 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ```sh
 python flir_app.py              # connect to the camera (falls back to mock mode if none is found)
 python flir_app.py --mock       # synthetic stream, no hardware needed
-python flir_app.py --debug      # verbose USB / iAP2 logging
+python flir_app.py --verbose    # verbose USB / iAP2 logging (-v; --debug is the same)
 python flir_app.py --calib path/to/calib.rsc --snapshot-dir path/to/output
 python flir_app.py --radiometry shutter-offset   # force the older shutter-offset model
 ```
+
+By default the console shows only connection status, notices and warnings. `--verbose` (or `-v`, or `--debug`) adds every iAP2 packet and the USB interface details.
 
 `--calib` defaults to the `calib.rsc` next to `flir_app.py`. Snapshots default to `snapshots/` next to it.
 
